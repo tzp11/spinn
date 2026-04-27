@@ -1,0 +1,68 @@
+
+import torch
+import torchvision
+import onnx
+import os
+import warnings
+
+warnings.filterwarnings("ignore")
+
+def analyze_onnx_ops(onnx_path, model_name):
+    print(f"\n{'='*20} Analyzing {model_name} {'='*20}")
+    try:
+        model = onnx.load(onnx_path)
+        ops = set()
+        for node in model.graph.node:
+            ops.add(node.op_type)
+        print(f"Total Unique Ops: {len(ops)}")
+        print(f"Ops: {sorted(list(ops))}")
+        return ops
+    except Exception as e:
+        print(f"Failed to analyze {onnx_path}: {e}")
+        return set()
+
+def export_and_analyze_resnet101():
+    print("\n[Exporting ResNet101...]")
+    try:
+        model = torchvision.models.resnet101(weights=None)
+        model.eval()
+        dummy_input = torch.randn(1, 3, 224, 224)
+        onnx_path = "resnet101.onnx"
+        # Let torch decide opset to avoid conversion errors
+        torch.onnx.export(model, dummy_input, onnx_path)
+        return analyze_onnx_ops(onnx_path, "ResNet101")
+    except Exception as e:
+        print(f"Error exporting ResNet101: {e}")
+        return set()
+
+def export_and_analyze_fasterrcnn():
+    print("\n[Exporting FasterRCNN (ResNet50-FPN)...]")
+    try:
+        model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=None)
+        model.eval()
+        dummy_input = torch.randn(1, 3, 300, 300)
+        onnx_path = "fasterrcnn.onnx"
+        torch.onnx.export(model, dummy_input, onnx_path)
+        return analyze_onnx_ops(onnx_path, "Faster R-CNN")
+    except Exception as e:
+        print(f"Error exporting FasterRCNN: {e}")
+        return set()
+
+if __name__ == "__main__":
+    current_ops = {
+        'Relu', 'Add', 'MatMul', 'Softmax', 'Reshape', 'Transpose', 
+        'Conv', 'MaxPool', 'Neg', 'Div', 'InstanceNormalization', 
+        'Gemm', 'ReduceMean', 'Equal', 'LayerNormalization'
+    }
+    
+    # 1. ResNet101
+    resnet_ops = export_and_analyze_resnet101()
+    if resnet_ops:
+        missing = resnet_ops - current_ops
+        print(f"MISSING for ResNet101 ({len(missing)}): {sorted(list(missing))}")
+        
+    # 2. Faster R-CNN
+    rcnn_ops = export_and_analyze_fasterrcnn()
+    if rcnn_ops:
+        missing = rcnn_ops - current_ops
+        print(f"MISSING for Faster R-CNN ({len(missing)}): {sorted(list(missing))}")

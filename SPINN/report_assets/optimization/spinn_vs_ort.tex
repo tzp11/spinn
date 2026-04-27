@@ -1,0 +1,14 @@
+% Requires: \usepackage{booktabs}
+\begin{table}[htbp]
+\centering
+\caption{Latency comparison between SPINN and ONNX Runtime on ResNet-101.}
+\label{tab:spinn_ort_comparison}
+\begin{tabular}{l r c}
+\toprule
+System & 1T latency (ms) & 4T/8T latency (ms) \\
+\midrule
+ONNX Runtime (1.23.2) & 125.0 & 90.0--110.0 \\
+SPINN (优化后版本) & 208.2 & 106.6--106.6 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="760" viewBox="0 0 1500 760">
+<style>
+.title{font:700 22px "Times New Roman", serif; fill:#111827;}
+.subtitle{font:14px "Times New Roman", serif; fill:#4b5563;}
+.axis{stroke:#374151; stroke-width:1.2;}
+.grid{stroke:#d1d5db; stroke-width:1; stroke-dasharray:4 4;}
+.label{font:14px "Times New Roman", serif; fill:#111827;}
+.small{font:12px "Times New Roman", serif; fill:#374151;}
+.legend{font:13px "Times New Roman", serif; fill:#111827;}
+</style>
+<rect x="0" y="0" width="1500" height="760" fill="white"/>
+<text class="title" x="90" y="40">SPINN 优化过程的时延下降瀑布图</text>
+<text class="subtitle" x="90" y="64">ResNet-101 单线程推理时延</text>
+<line class="grid" x1="90" y1="650.0" x2="1450" y2="650.0"/>
+<text class="small" x="80" y="654.0" text-anchor="end">0</text>
+<line class="grid" x1="90" y1="510.0" x2="1450" y2="510.0"/>
+<text class="small" x="80" y="514.0" text-anchor="end">4000</text>
+<line class="grid" x1="90" y1="370.0" x2="1450" y2="370.0"/>
+<text class="small" x="80" y="374.0" text-anchor="end">8000</text>
+<line class="grid" x1="90" y1="230.0" x2="1450" y2="230.0"/>
+<text class="small" x="80" y="234.0" text-anchor="end">12000</text>
+<line class="grid" x1="90" y1="90.0" x2="1450" y2="90.0"/>
+<text class="small" x="80" y="94.0" text-anchor="end">16000</text>
+<line class="axis" x1="90" y1="90" x2="90" y2="650"/>
+<line class="axis" x1="90" y1="650" x2="1450" y2="650"/>
+<rect x="192.0" y="90.0" width="78.9" height="560.0" fill="#0f766e"/>
+<text class="small" x="231.4" y="674" text-anchor="middle">初始</text>
+<text class="small" x="231.4" y="80.0" text-anchor="middle">16000</text>
+<rect x="328.0" y="132.0" width="78.9" height="-42.0" fill="#2563eb"/>
+<line x1="308.3" y1="90.0" x2="406.9" y2="90.0" stroke="#6b7280" stroke-dasharray="3 3"/>
+<text class="small" x="367.4" y="672" text-anchor="middle">S1</text>
+<text class="small" x="367.4" y="688" text-anchor="middle">下降 1200</text>
+<rect x="464.0" y="417.2" width="78.9" height="-285.2" fill="#2563eb"/>
+<line x1="444.3" y1="132.0" x2="542.9" y2="132.0" stroke="#6b7280" stroke-dasharray="3 3"/>
+<text class="small" x="503.4" y="672" text-anchor="middle">S2</text>
+<text class="small" x="503.4" y="688" text-anchor="middle">下降 8150</text>
+<rect x="600.0" y="422.5" width="78.9" height="-5.2" fill="#2563eb"/>
+<line x1="580.3" y1="417.2" x2="678.9" y2="417.2" stroke="#6b7280" stroke-dasharray="3 3"/>
+<text class="small" x="639.4" y="672" text-anchor="middle">S3</text>
+<text class="small" x="639.4" y="688" text-anchor="middle">下降 150</text>
+<rect x="736.0" y="559.0" width="78.9" height="-136.5" fill="#2563eb"/>
+<line x1="716.3" y1="422.5" x2="814.9" y2="422.5" stroke="#6b7280" stroke-dasharray="3 3"/>
+<text class="small" x="775.4" y="672" text-anchor="middle">S4</text>
+<text class="small" x="775.4" y="688" text-anchor="middle">下降 3900</text>
+<rect x="872.0" y="628.3" width="78.9" height="-69.3" fill="#2563eb"/>
+<line x1="852.3" y1="559.0" x2="950.9" y2="559.0" stroke="#6b7280" stroke-dasharray="3 3"/>
+<text class="small" x="911.4" y="672" text-anchor="middle">S5</text>
+<text class="small" x="911.4" y="688" text-anchor="middle">下降 1980</text>
+<rect x="1008.0" y="640.7" width="78.9" height="-12.4" fill="#2563eb"/>
+<line x1="988.3" y1="628.3" x2="1086.9" y2="628.3" stroke="#6b7280" stroke-dasharray="3 3"/>
+<text class="small" x="1047.4" y="672" text-anchor="middle">S6</text>
+<text class="small" x="1047.4" y="688" text-anchor="middle">下降 355</text>
+<rect x="1144.0" y="642.4" width="78.9" height="-1.7" fill="#2563eb"/>
+<line x1="1124.3" y1="640.7" x2="1222.9" y2="640.7" stroke="#6b7280" stroke-dasharray="3 3"/>
+<text class="small" x="1183.4" y="672" text-anchor="middle">S7</text>
+<text class="small" x="1183.4" y="688" text-anchor="middle">下降 48</text>
+<rect x="1280.0" y="646.2" width="78.9" height="-3.8" fill="#2563eb"/>
+<line x1="1260.3" y1="642.4" x2="1358.9" y2="642.4" stroke="#6b7280" stroke-dasharray="3 3"/>
+<text class="small" x="1319.4" y="672" text-anchor="middle">S8</text>
+<text class="small" x="1319.4" y="688" text-anchor="middle">下降 108</text>
+<rect x="1416.0" y="642.6" width="78.9" height="7.4" fill="#b91c1c"/>
+<text class="small" x="1455.4" y="674" text-anchor="middle">最终</text>
+<text class="small" x="1455.4" y="632.6" text-anchor="middle">211</text>
+<text class="label" x="1240" y="110">总加速比: 75.8x</text>
+<text class="label" transform="translate(22 370.0) rotate(-90)">推理时延 (ms)</text>
+</svg>
