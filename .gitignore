@@ -1,0 +1,45 @@
+# Compiled objects
+*.o
+*.a
+
+# Build artifacts
+SPINN/spinn_run
+SPINN/run_time/spinn_run
+SPINN/run_time/profile_memory
+SPINN/onnx2ennf
+
+# Model files (large)
+*.ennf
+*.onnx
+*.onnx.data
+
+# Archives
+*.tar.gz
+*.zip
+
+# Reference projects (not part of SPINN)
+libonnx/
+onnx2c/
+onnxruntime_src/
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+.env/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and temp
+*.log
+*.txt
+!.gitignore
