@@ -159,15 +159,12 @@ int main(int argc, char *argv[]) {
     fprintf(fp, "/* ===== 静态 Arena (FeatureMap 池, 编译期确定大小) ===== */\n");
     fprintf(fp, "static uint8_t g_arena[MODEL_ARENA_SIZE] __attribute__((aligned(16)));\n\n");
 
-    /* 内嵌权重数据：将所有权重连续放入 g_weights，记录每个 tensor 的偏移 */
-    fprintf(fp, "/* ===== 内嵌权重 (static const, 编译期数据) ===== */\n");
-    /* 计算总大小并分配映射表 */
+    /* 计算总权重大小并准备 blob */
     uint32_t total_w_size = 0;
     uint32_t *weight_off_in_blob = (uint32_t*)calloc(ctx->num_tensors, sizeof(uint32_t));
     for (uint32_t i = 0; i < ctx->num_tensors; i++) {
         SpinnTensor *t = &ctx->tensors[i];
         if (t->is_weight && t->size > 0) {
-            /* 16 字节对齐 */
             total_w_size = (total_w_size + 15) & ~15;
             weight_off_in_blob[i] = total_w_size;
             total_w_size += t->size;
@@ -175,9 +172,7 @@ int main(int argc, char *argv[]) {
             weight_off_in_blob[i] = 0xFFFFFFFFu;
         }
     }
-    fprintf(fp, "#define MODEL_WEIGHTS_SIZE %u\n", total_w_size);
-    fprintf(fp, "static const uint8_t g_weights[MODEL_WEIGHTS_SIZE] __attribute__((aligned(16))) = {\n");
-    /* 拼接权重并输出 */
+    /* 拼接权重 blob */
     uint8_t *blob = (uint8_t*)calloc(1, total_w_size);
     for (uint32_t i = 0; i < ctx->num_tensors; i++) {
         SpinnTensor *t = &ctx->tensors[i];
@@ -185,9 +180,44 @@ int main(int argc, char *argv[]) {
             memcpy(blob + weight_off_in_blob[i], t->data, t->size);
         }
     }
-    emit_byte_array(fp, blob, total_w_size);
+
+    /* 决定权重输出方式:
+     * - 小模型 (<= 16MB): 内嵌为 C 数组 (源码可读, 适合纯 ROM 部署)
+     * - 大模型 (> 16MB): 写为外部 weights.bin, 通过 objcopy/incbin 链接
+     */
+    const uint32_t INLINE_WEIGHT_THRESHOLD = 16 * 1024 * 1024;
+    int use_external_weights = (total_w_size > INLINE_WEIGHT_THRESHOLD);
+
+    fprintf(fp, "#define MODEL_WEIGHTS_SIZE %u\n", total_w_size);
+    if (use_external_weights) {
+        fprintf(fp, "/* ===== 权重数据 (外部 bin + objcopy 链接, 仍位于 .rodata) ===== */\n");
+        fprintf(fp, "/* 由 Makefile 通过 objcopy 把 weights.bin 转为 ELF 对象链接进来。\n");
+        fprintf(fp, " * 链接器自动生成符号 _binary_weights_bin_start 等。 */\n");
+        fprintf(fp, "extern const uint8_t _binary_weights_bin_start[];\n");
+        fprintf(fp, "extern const uint8_t _binary_weights_bin_end[];\n");
+        fprintf(fp, "#define g_weights _binary_weights_bin_start\n\n");
+
+        /* 写出 weights.bin */
+        char wbin_path[1024];
+        snprintf(wbin_path, sizeof(wbin_path), "%s/weights.bin", out_dir);
+        FILE *wfp = fopen(wbin_path, "wb");
+        if (!wfp) {
+            fprintf(stderr, "Failed to write %s\n", wbin_path);
+            free(blob); free(weight_off_in_blob); spinn_free(ctx); return 1;
+        }
+        if (fwrite(blob, 1, total_w_size, wfp) != total_w_size) {
+            fprintf(stderr, "Failed to write weights.bin\n");
+            fclose(wfp); free(blob); free(weight_off_in_blob); spinn_free(ctx); return 1;
+        }
+        fclose(wfp);
+        printf("      [OK] weights.bin (%u bytes external)\n", total_w_size);
+    } else {
+        fprintf(fp, "/* ===== 内嵌权重 (static const, 编译期数据) ===== */\n");
+        fprintf(fp, "static const uint8_t g_weights[MODEL_WEIGHTS_SIZE] __attribute__((aligned(16))) = {\n");
+        emit_byte_array(fp, blob, total_w_size);
+        fprintf(fp, "};\n\n");
+    }
     free(blob);
-    fprintf(fp, "};\n\n");
 
     /* Tensor 维度数组（dims）单独表 */
     fprintf(fp, "/* ===== Tensor 元数据 ===== */\n");
@@ -384,17 +414,33 @@ int main(int argc, char *argv[]) {
         fprintf(fp, "    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;\n");
         fprintf(fp, "}\n\n");
         fprintf(fp, "int main(int argc, char *argv[]) {\n");
-        fprintf(fp, "    /* 准备输入 (与 SPINN runtime 一致, 测试用) */\n");
+        fprintf(fp, "    int num_runs = (argc >= 2) ? atoi(argv[1]) : 1;\n");
+        fprintf(fp, "    if (num_runs < 1) num_runs = 1;\n");
+        fprintf(fp, "    int warmup = (num_runs > 1) ? 3 : 0;\n");
+        fprintf(fp, "    /* 准备输入 (与 SPINN runtime 一致: input[i]=i/1000.0) */\n");
         fprintf(fp, "    float *input = (float*)malloc(MODEL_INPUT_SIZE);\n");
         fprintf(fp, "    float *output = (float*)malloc(MODEL_OUTPUT_SIZE);\n");
         fprintf(fp, "    for (uint32_t i = 0; i < MODEL_INPUT_ELEMS; i++) input[i] = (float)i / 1000.0f;\n\n");
         fprintf(fp, "    double t0 = now_ms();\n");
         fprintf(fp, "    model_init();\n");
-        fprintf(fp, "    double t_init = now_ms() - t0;\n\n");
-        fprintf(fp, "    t0 = now_ms();\n");
-        fprintf(fp, "    model_run(input, output);\n");
-        fprintf(fp, "    double t_run = now_ms() - t0;\n\n");
-        fprintf(fp, "    fprintf(stderr, \"Init: %%.2fms, Run: %%.2fms\\n\", t_init, t_run);\n");
+        fprintf(fp, "    double t_init = now_ms() - t0;\n");
+        fprintf(fp, "    if (num_runs > 1) fprintf(stderr, \"Init: %%.2fms\\n\", t_init);\n\n");
+        fprintf(fp, "    /* warmup */\n");
+        fprintf(fp, "    for (int i = 0; i < warmup; i++) model_run(input, output);\n\n");
+        fprintf(fp, "    /* benchmark */\n");
+        fprintf(fp, "    double best = 1e9, total = 0;\n");
+        fprintf(fp, "    for (int i = 0; i < num_runs; i++) {\n");
+        fprintf(fp, "        t0 = now_ms();\n");
+        fprintf(fp, "        model_run(input, output);\n");
+        fprintf(fp, "        double e = now_ms() - t0;\n");
+        fprintf(fp, "        if (e < best) best = e;\n");
+        fprintf(fp, "        total += e;\n");
+        fprintf(fp, "        if (num_runs > 1) fprintf(stderr, \"  Run %%d: %%.2fms\\n\", i+1, e);\n");
+        fprintf(fp, "    }\n");
+        fprintf(fp, "    if (num_runs > 1)\n");
+        fprintf(fp, "        fprintf(stderr, \"Best: %%.2fms, Avg: %%.2fms\\n\", best, total/num_runs);\n");
+        fprintf(fp, "    else\n");
+        fprintf(fp, "        fprintf(stderr, \"Init: %%.2fms, Run: %%.2fms\\n\", t_init, total);\n");
         fprintf(fp, "    fprintf(stderr, \"Arena: %%u bytes\\n\", (uint32_t)MODEL_ARENA_SIZE);\n");
         fprintf(fp, "    printf(\"Generated Result: \");\n");
         fprintf(fp, "    int n = (MODEL_OUTPUT_ELEMS > 10) ? 10 : MODEL_OUTPUT_ELEMS;\n");
@@ -433,14 +479,30 @@ int main(int argc, char *argv[]) {
         fprintf(fp, "ASM = $(RT)/ops/mm/gemm_kernel_avx2_asm.S\n\n");
         fprintf(fp, "RT_SRCS = $(RT)/spinn_ops.c $(RT)/spinn_threadpool.c\n\n");
         fprintf(fp, "TARGET = model_run\n\n");
-        fprintf(fp, "all: $(TARGET)\n\n");
-        fprintf(fp, "$(TARGET): model.c main_test.c $(RT_SRCS) $(OPS) $(ASM)\n");
-        fprintf(fp, "\t$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)\n\n");
-        fprintf(fp, "clean:\n");
-        fprintf(fp, "\trm -f $(TARGET)\n\n");
+        if (use_external_weights) {
+            fprintf(fp, "# 大模型权重通过 objcopy 嵌入 (链接到 .rodata 段)\n");
+            fprintf(fp, "WEIGHTS_OBJ = weights.o\n");
+            fprintf(fp, "all: $(TARGET)\n\n");
+            fprintf(fp, "$(WEIGHTS_OBJ): weights.bin\n");
+            fprintf(fp, "\tobjcopy --input-target=binary --output-target=elf64-x86-64 \\\n");
+            fprintf(fp, "\t        --binary-architecture=i386:x86-64 \\\n");
+            fprintf(fp, "\t        --rename-section .data=.rodata,alloc,load,readonly,data,contents \\\n");
+            fprintf(fp, "\t        weights.bin $@\n\n");
+            fprintf(fp, "$(TARGET): model.c main_test.c $(WEIGHTS_OBJ) $(RT_SRCS) $(OPS) $(ASM)\n");
+            fprintf(fp, "\t$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)\n\n");
+            fprintf(fp, "clean:\n");
+            fprintf(fp, "\trm -f $(TARGET) $(WEIGHTS_OBJ)\n\n");
+        } else {
+            fprintf(fp, "all: $(TARGET)\n\n");
+            fprintf(fp, "$(TARGET): model.c main_test.c $(RT_SRCS) $(OPS) $(ASM)\n");
+            fprintf(fp, "\t$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)\n\n");
+            fprintf(fp, "clean:\n");
+            fprintf(fp, "\trm -f $(TARGET)\n\n");
+        }
         fprintf(fp, ".PHONY: all clean\n");
         fclose(fp);
-        printf("      [OK] Makefile\n");
+        printf("      [OK] Makefile (%s weights)\n",
+               use_external_weights ? "external bin" : "inline");
     }
 
     spinn_free(ctx);
