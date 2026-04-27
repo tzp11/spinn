@@ -17,10 +17,15 @@ import re
 import os
 
 
-def run_with_time(cmd):
+def run_with_time(cmd, env_extra=None):
     """Run command via /usr/bin/time -v, return (stdout, max_rss_kb)."""
     full = ["/usr/bin/time", "-v"] + cmd
-    r = subprocess.run(full, capture_output=True, text=True)
+    env = os.environ.copy()
+    # 默认设置 OMP_NUM_THREADS=4 (i7-9700K 实测 8 线程时 conv 同步开销爆炸)
+    env.setdefault("OMP_NUM_THREADS", "4")
+    if env_extra:
+        env.update(env_extra)
+    r = subprocess.run(full, capture_output=True, text=True, env=env)
     rss = None
     for line in r.stderr.splitlines():
         m = re.search(r"Maximum resident set size \(kbytes\):\s+(\d+)", line)
