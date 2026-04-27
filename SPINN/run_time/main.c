@@ -118,6 +118,7 @@ int main(int argc, char *argv[]) {
     
     free(input_data);
     free(output_data);
+    spinn_profile_dump();
     spinn_free(ctx);
     return 0;
 }

@@ -131,6 +131,11 @@ int spinn_run(SpinnContext *ctx, void *input_data, void *output_data);
 void spinn_free(SpinnContext *ctx);
 
 /**
+ * 打印 per-op 计时统计 (需要环境变量 SPINN_PROFILE=1 启用)
+ */
+void spinn_profile_dump(void);
+
+/**
  * 获取权重数据 (Lazy Load)
  * @param ctx 上下文
  * @param tensor_id 权重 Tensor ID

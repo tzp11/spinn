@@ -10,6 +10,7 @@
 #include "spinn_runtime.h"
 #include "spinn_memory_planner.h"
 #include "spinn_ops.h"
+#include "../ennf_op_types.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -242,9 +243,61 @@ void print_tensor_stats(SpinnContext *ctx, uint16_t tensor_id, const char *tag) 
 
 /* ============================================================
  * 阶段 3: 执行推理
+ *
+ * 设置环境变量 SPINN_PROFILE=1 启用 per-op 累计耗时统计。
+ * 仅在 spinn_run 第一次调用时初始化, 在 spinn_free 时打印汇总。
  * ============================================================ */
+#include <time.h>
+
+#define SPINN_PROF_OPS 512
+static double g_prof_op_time[SPINN_PROF_OPS] = {0};
+static uint64_t g_prof_op_count[SPINN_PROF_OPS] = {0};
+static int g_prof_enabled = -1;  /* -1=未初始化, 0=禁用, 1=启用 */
+
+static double prof_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+static void prof_init_once(void) {
+    if (g_prof_enabled >= 0) return;
+    const char *env = getenv("SPINN_PROFILE");
+    g_prof_enabled = (env && env[0] != '0') ? 1 : 0;
+}
+
+void spinn_profile_dump(void) {
+    if (g_prof_enabled <= 0) return;
+    double total = 0;
+    for (int i = 0; i < SPINN_PROF_OPS; i++) total += g_prof_op_time[i];
+    if (total <= 0) return;
+    fprintf(stderr, "\n===== SPINN per-op profile =====\n");
+    fprintf(stderr, "%-6s %-12s %10s %10s %8s %8s\n",
+            "op_id", "name", "calls", "total_ms", "ms/call", "%total");
+    /* 简单选择排序找前 12 个 */
+    int idx[SPINN_PROF_OPS];
+    for (int i = 0; i < SPINN_PROF_OPS; i++) idx[i] = i;
+    for (int i = 0; i < 12 && i < SPINN_PROF_OPS; i++) {
+        int best = i;
+        for (int j = i + 1; j < SPINN_PROF_OPS; j++) {
+            if (g_prof_op_time[idx[j]] > g_prof_op_time[idx[best]]) best = j;
+        }
+        int tmp = idx[i]; idx[i] = idx[best]; idx[best] = tmp;
+        int op = idx[i];
+        if (g_prof_op_time[op] <= 0) break;
+        fprintf(stderr, "%-6d %-12s %10lu %10.2f %8.3f %7.1f%%\n",
+                op, ennf_get_op_name((ENNF_OpType)op),
+                (unsigned long)g_prof_op_count[op],
+                g_prof_op_time[op],
+                g_prof_op_time[op] / g_prof_op_count[op],
+                100.0 * g_prof_op_time[op] / total);
+    }
+    fprintf(stderr, "Total tracked: %.2f ms\n", total);
+}
+
 int spinn_run(SpinnContext *ctx, void *input_data, void *output_data) {
     if (!ctx) return -1;
+    prof_init_once();
     
     // 复制输入数据
     SpinnTensor *t_in = &ctx->tensors[ctx->input_ids[0]];
@@ -272,11 +325,24 @@ int spinn_run(SpinnContext *ctx, void *input_data, void *output_data) {
             outputs[j] = &ctx->tensors[node->output_ids[j]];
         }
         
-        // 调度算子
-        spinn_dispatch_op(node->op_type,
-                          inputs, node->num_inputs,
-                          node->params, node->params_size,
-                          outputs, node->num_outputs);
+        // 调度算子 (可选 per-op 计时)
+        if (g_prof_enabled) {
+            double t0 = prof_now_ms();
+            spinn_dispatch_op(node->op_type,
+                              inputs, node->num_inputs,
+                              node->params, node->params_size,
+                              outputs, node->num_outputs);
+            double dt = prof_now_ms() - t0;
+            if (node->op_type < SPINN_PROF_OPS) {
+                g_prof_op_time[node->op_type] += dt;
+                g_prof_op_count[node->op_type] += 1;
+            }
+        } else {
+            spinn_dispatch_op(node->op_type,
+                              inputs, node->num_inputs,
+                              node->params, node->params_size,
+                              outputs, node->num_outputs);
+        }
     }
     
     // 复制输出数据

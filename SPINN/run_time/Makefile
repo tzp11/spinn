@@ -21,7 +21,7 @@ OPS_SRCS = $(wildcard ops/activation/*.c) \
 ASM_SRCS = ops/mm/gemm_kernel_avx2_asm.S
 ASM_OBJS = $(ASM_SRCS:.S=.o)
 
-SRCS = spinn_runtime.c spinn_memory_planner.c spinn_ops.c spinn_threadpool.c main.c $(OPS_SRCS)
+SRCS = spinn_runtime.c spinn_memory_planner.c spinn_ops.c spinn_threadpool.c ../ennf_op_types.c main.c $(OPS_SRCS)
 OBJS = $(SRCS:.c=.o)
 
 
