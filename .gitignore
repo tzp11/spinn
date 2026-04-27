@@ -7,6 +7,8 @@ SPINN/spinn_run
 SPINN/run_time/spinn_run
 SPINN/run_time/profile_memory
 SPINN/onnx2ennf
+SPINN/ennf2c/ennf2c
+SPINN/ennf2c/generated_*/
 
 # Model files (large)
 *.ennf
