@@ -24,10 +24,16 @@
 #define NODE_FLAG_SKIP    1    /* 该节点已被融合到前序节点，转换时跳过 */
 #define NODE_FLAG_HAS_ACT 2   /* Conv/Gemm 节点融合了激活函数 */
 
-/* 激活类型 (嵌入 Conv 参数的 reserved 字段) */
-#define FUSED_ACT_NONE    0
-#define FUSED_ACT_RELU    1
-#define FUSED_ACT_CLIP    2   /* ReLU6 等 */
+/* 融合后处理类型 (嵌入 Conv 参数的 reserved 字段, 1 字节)
+ * 共享一个字段, 因为 Conv 之后只可能有一种 post-op 序列.
+ * 当类型为 ADD/ADD_RELU 时, Conv 的最后一个 input 作为 residual.
+ */
+#define FUSED_ACT_NONE     0
+#define FUSED_ACT_RELU     1   /* Conv -> ReLU */
+#define FUSED_ACT_CLIP     2   /* Conv -> Clip(min,max) (ReLU6 等), 暂未启用 */
+#define FUSED_ACT_SILU     3   /* Conv -> Sigmoid -> Mul: SiLU/Swish, YOLO 主要 */
+#define FUSED_ACT_ADD      4   /* Conv -> Add: 残差连接 */
+#define FUSED_ACT_ADD_RELU 5   /* Conv -> Add -> ReLU: ResNet 残差块 */
 
 /* ============================================================
  * 图优化上下文

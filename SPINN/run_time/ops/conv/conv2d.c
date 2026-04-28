@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -60,10 +61,20 @@ int op_conv2d(SpinnTensor **in, int n_in,
               SpinnTensor **out, int n_out) {
     if (n_in < 2 || n_out < 1) return -1;
 
+    /* 提前嗅探融合类型 (在使用 in[2] 之前判断, 因为 ADD/ADD_RELU 时
+     * 最后一个 input 是 residual, 而不是 bias) */
+    int fused_act_pre = 0;
+    if (params && params_size >= sizeof(ENNF_ConvParams)) {
+        fused_act_pre = ((ENNF_ConvParams*)params)->reserved;
+    }
+    int has_residual = (fused_act_pre == 4 /*ADD*/ || fused_act_pre == 5 /*ADD_RELU*/);
+    int n_real_in = has_residual ? (n_in - 1) : n_in;
+    float *residual = has_residual ? (float*)in[n_in - 1]->data : NULL;
+
     float *X     = (float*)in[0]->data;
     float *W     = (float*)in[1]->data;
     float *Y     = (float*)out[0]->data;
-    float *bias  = (n_in > 2 && in[2] && in[2]->data) ? (float*)in[2]->data : NULL;
+    float *bias  = (n_real_in > 2 && in[2] && in[2]->data) ? (float*)in[2]->data : NULL;
 
     int N     = in[0]->dims[0];
     int C     = in[0]->dims[1];
@@ -189,14 +200,46 @@ int op_conv2d(SpinnTensor **in, int n_in,
 
     if (col_buf) free(col_buf);
 
-    /* 融合激活 */
+    /* ============================================================
+     * 融合 post-op (依据 fused_act 编码:
+     *   1 = ReLU
+     *   3 = SiLU (x * sigmoid(x))
+     *   4 = Add (residual)
+     *   5 = Add + ReLU
+     * ============================================================ */
+    int total = N * OC * OH * OW;
     if (fused_act == 1) {
-        int total = N * OC * OH * OW;
         #ifdef _OPENMP
         #pragma omp parallel for schedule(static) if(total >= 4096)
         #endif
         for (int i = 0; i < total; i++) {
             if (Y[i] < 0.0f) Y[i] = 0.0f;
+        }
+    } else if (fused_act == 3) {
+        /* SiLU: y = x / (1 + exp(-x)) */
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(static) if(total >= 4096)
+        #endif
+        for (int i = 0; i < total; i++) {
+            float x = Y[i];
+            Y[i] = x / (1.0f + expf(-x));
+        }
+    } else if (fused_act == 4 && residual) {
+        /* Conv + Add (残差) */
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(static) if(total >= 4096)
+        #endif
+        for (int i = 0; i < total; i++) {
+            Y[i] += residual[i];
+        }
+    } else if (fused_act == 5 && residual) {
+        /* Conv + Add + ReLU (ResNet 残差块) */
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(static) if(total >= 4096)
+        #endif
+        for (int i = 0; i < total; i++) {
+            float v = Y[i] + residual[i];
+            Y[i] = v < 0.0f ? 0.0f : v;
         }
     }
 

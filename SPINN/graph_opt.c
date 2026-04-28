@@ -288,6 +288,214 @@ static int fuse_conv_relu(GraphOptContext *ctx) {
 }
 
 /* ============================================================
+ * Pass 3: Conv + Add (+ ReLU) 融合 (残差连接, ResNet 主要场景)
+ *
+ * 模式: Conv(out=A) -> Add(A, residual_R)(out=B) [-> ReLU(B)(out=C)]
+ *
+ * 融合后 Conv 节点拥有 4 个 input: X, W, B, R(residual)
+ * Conv 内核在 GEMM+bias 之后做 Y = max(0, Y + R) (ADD_RELU)
+ *                          或 Y = Y + R           (ADD)
+ *
+ * 跳过条件:
+ *   - Conv 输出有多于一个消费者 (会被 SiLU 之类用到)
+ *   - Add 的两个输入都是 Conv 输出 (自加)
+ *   - residual 是 initializer (那是常数 bias, 不需要 add 融合)
+ * ============================================================ */
+static int fuse_conv_add(GraphOptContext *ctx) {
+    Onnx__GraphProto *graph = ctx->graph;
+    int fused = 0;
+
+    for (size_t i = 0; i + 1 < graph->n_node; i++) {
+        if (ctx->node_flags[i] & NODE_FLAG_SKIP) continue;
+        if (ctx->fused_act[i] != FUSED_ACT_NONE) continue;
+
+        Onnx__NodeProto *conv = graph->node[i];
+        if (strcmp(conv->op_type, "Conv") != 0) continue;
+        if (conv->n_output < 1 || !conv->output[0]) continue;
+
+        const char *conv_out = conv->output[0];
+        if (count_consumers(graph, conv_out, i + 1, ctx->node_flags) != 1) continue;
+
+        /* 找下一个消费者 */
+        Onnx__NodeProto *add = NULL;
+        size_t add_idx = 0;
+        for (size_t j = i + 1; j < graph->n_node; j++) {
+            if (ctx->node_flags[j] & NODE_FLAG_SKIP) continue;
+            for (size_t k = 0; k < graph->node[j]->n_input; k++) {
+                if (graph->node[j]->input[k] &&
+                    strcmp(graph->node[j]->input[k], conv_out) == 0) {
+                    if (strcmp(graph->node[j]->op_type, "Add") == 0 &&
+                        graph->node[j]->n_input == 2) {
+                        add = graph->node[j];
+                        add_idx = j;
+                    }
+                    goto add_found_or_not;
+                }
+            }
+        }
+add_found_or_not:
+        if (!add) continue;
+
+        /* 找出 residual (Add 的另一输入) */
+        const char *residual_name = NULL;
+        if (strcmp(add->input[0], conv_out) == 0) {
+            residual_name = add->input[1];
+        } else if (strcmp(add->input[1], conv_out) == 0) {
+            residual_name = add->input[0];
+        }
+        if (!residual_name) continue;
+        /* residual 不能是 initializer (那种应该被融合成 bias) */
+        if (find_initializer(graph, residual_name)) continue;
+
+        /* 拓扑序检查: residual 必须由当前 Conv (idx i) 之前的节点产生,
+         * 否则融合后 Conv 会引用尚未执行节点的输出 (典型场景: ResNet
+         * 每个 stage 第一个 bottleneck 的 downsample 分支在主路径后).
+         * 也允许 residual 是 graph input. */
+        int residual_ready = 0;
+        for (size_t k = 0; k < i; k++) {
+            for (size_t m = 0; m < graph->node[k]->n_output; m++) {
+                if (graph->node[k]->output[m] &&
+                    strcmp(graph->node[k]->output[m], residual_name) == 0) {
+                    residual_ready = 1;
+                    break;
+                }
+            }
+            if (residual_ready) break;
+        }
+        if (!residual_ready) {
+            for (size_t k = 0; k < graph->n_input; k++) {
+                if (graph->input[k]->name &&
+                    strcmp(graph->input[k]->name, residual_name) == 0) {
+                    residual_ready = 1;
+                    break;
+                }
+            }
+        }
+        if (!residual_ready) continue;
+
+        /* 检查 Add 输出是否唯一被一个 ReLU 消费 (升级为 ADD_RELU) */
+        const char *add_out = add->output[0];
+        Onnx__NodeProto *relu = NULL;
+        size_t relu_idx = 0;
+        if (count_consumers(graph, add_out, add_idx + 1, ctx->node_flags) == 1) {
+            for (size_t j = add_idx + 1; j < graph->n_node; j++) {
+                if (ctx->node_flags[j] & NODE_FLAG_SKIP) continue;
+                if (graph->node[j]->n_input > 0 &&
+                    graph->node[j]->input[0] &&
+                    strcmp(graph->node[j]->input[0], add_out) == 0) {
+                    if (strcmp(graph->node[j]->op_type, "Relu") == 0) {
+                        relu = graph->node[j];
+                        relu_idx = j;
+                    }
+                    break;
+                }
+            }
+        }
+
+        /* 执行融合 */
+        if (relu) {
+            printf("  [FUSE] Conv+Add+ReLU: nodes %zu+%zu+%zu\n", i, add_idx, relu_idx);
+            free(conv->output[0]);
+            conv->output[0] = strdup(relu->output[0]);
+            ctx->node_flags[add_idx] = NODE_FLAG_SKIP;
+            ctx->node_flags[relu_idx] = NODE_FLAG_SKIP;
+            ctx->fused_act[i] = FUSED_ACT_ADD_RELU;
+        } else {
+            printf("  [FUSE] Conv+Add: nodes %zu+%zu\n", i, add_idx);
+            free(conv->output[0]);
+            conv->output[0] = strdup(add->output[0]);
+            ctx->node_flags[add_idx] = NODE_FLAG_SKIP;
+            ctx->fused_act[i] = FUSED_ACT_ADD;
+        }
+        ctx->node_flags[i] |= NODE_FLAG_HAS_ACT;
+
+        /* 在 Conv 的 input 列表末尾追加 residual_name */
+        size_t old_n = conv->n_input;
+        conv->input = realloc(conv->input, (old_n + 1) * sizeof(char*));
+        conv->input[old_n] = strdup(residual_name);
+        conv->n_input = old_n + 1;
+
+        fused++;
+    }
+    return fused;
+}
+
+/* ============================================================
+ * Pass 4: Conv + Sigmoid + Mul = SiLU 融合 (YOLO 等)
+ *
+ * 模式: Conv(out=A) -> Sigmoid(A)(out=S) -> Mul(A, S)(out=B)
+ * (Conv 输出有 2 个消费者: Sigmoid 和 Mul)
+ *
+ * 融合后 Conv 输出 = Mul 输出, 内核后段做 y = x / (1+exp(-x))
+ * ============================================================ */
+static int fuse_conv_silu(GraphOptContext *ctx) {
+    Onnx__GraphProto *graph = ctx->graph;
+    int fused = 0;
+
+    for (size_t i = 0; i + 2 < graph->n_node; i++) {
+        if (ctx->node_flags[i] & NODE_FLAG_SKIP) continue;
+        if (ctx->fused_act[i] != FUSED_ACT_NONE) continue;
+
+        Onnx__NodeProto *conv = graph->node[i];
+        if (strcmp(conv->op_type, "Conv") != 0) continue;
+        if (conv->n_output < 1 || !conv->output[0]) continue;
+
+        const char *conv_out = conv->output[0];
+        if (count_consumers(graph, conv_out, i + 1, ctx->node_flags) != 2) continue;
+
+        /* 找两个消费者: Sigmoid 和 Mul */
+        Onnx__NodeProto *sig = NULL, *mul = NULL;
+        size_t sig_idx = 0, mul_idx = 0;
+        for (size_t j = i + 1; j < graph->n_node; j++) {
+            if (ctx->node_flags[j] & NODE_FLAG_SKIP) continue;
+            int consumes = 0;
+            for (size_t k = 0; k < graph->node[j]->n_input; k++) {
+                if (graph->node[j]->input[k] &&
+                    strcmp(graph->node[j]->input[k], conv_out) == 0) {
+                    consumes = 1;
+                    break;
+                }
+            }
+            if (!consumes) continue;
+            if (strcmp(graph->node[j]->op_type, "Sigmoid") == 0 && !sig) {
+                sig = graph->node[j]; sig_idx = j;
+            } else if (strcmp(graph->node[j]->op_type, "Mul") == 0 && !mul) {
+                mul = graph->node[j]; mul_idx = j;
+            } else {
+                /* 第三个消费者或意外 op, 放弃 */
+                sig = NULL; mul = NULL;
+                break;
+            }
+            if (sig && mul) break;
+        }
+        if (!sig || !mul) continue;
+
+        /* Sigmoid 的输出必须只被 Mul 消费 */
+        const char *sig_out = sig->output[0];
+        if (count_consumers(graph, sig_out, sig_idx + 1, ctx->node_flags) != 1) continue;
+        /* Mul 必须有 sig_out 作为另一个输入 */
+        int mul_takes_sig = 0;
+        if (mul->n_input == 2 &&
+            ((mul->input[0] && strcmp(mul->input[0], sig_out) == 0) ||
+             (mul->input[1] && strcmp(mul->input[1], sig_out) == 0))) {
+            mul_takes_sig = 1;
+        }
+        if (!mul_takes_sig) continue;
+
+        /* 执行融合 */
+        printf("  [FUSE] Conv+SiLU: nodes %zu+%zu+%zu\n", i, sig_idx, mul_idx);
+        free(conv->output[0]);
+        conv->output[0] = strdup(mul->output[0]);
+        ctx->node_flags[sig_idx] = NODE_FLAG_SKIP;
+        ctx->node_flags[mul_idx] = NODE_FLAG_SKIP;
+        ctx->fused_act[i] = FUSED_ACT_SILU;
+        ctx->node_flags[i] |= NODE_FLAG_HAS_ACT;
+        fused++;
+    }
+    return fused;
+}
+
+/* ============================================================
  * 公开 API
  * ============================================================ */
 
@@ -317,7 +525,22 @@ int graph_opt_run(GraphOptContext *ctx) {
     }
     printf("Conv+BN fusions: %d\n", total_conv_bn);
     
-    /* Pass 2: Conv + ReLU fusion (在 BN 融合之后做) */
+    /* Pass 2: Conv + Add(+ReLU) 残差融合 (在 ReLU pass 之前, 优先级更高)
+     * 设置 SPINN_DISABLE_CONV_ADD=1 可关闭以诊断. */
+    int total_conv_add = 0;
+    if (!getenv("SPINN_DISABLE_CONV_ADD")) {
+        total_conv_add = fuse_conv_add(ctx);
+    }
+    printf("Conv+Add(+ReLU) fusions: %d\n", total_conv_add);
+
+    /* Pass 3: Conv + SiLU 融合 (Sigmoid + Mul) */
+    int total_conv_silu = 0;
+    if (!getenv("SPINN_DISABLE_CONV_SILU")) {
+        total_conv_silu = fuse_conv_silu(ctx);
+    }
+    printf("Conv+SiLU fusions: %d\n", total_conv_silu);
+
+    /* Pass 4: Conv + ReLU fusion (剩余的 ReLU) */
     int total_conv_relu = fuse_conv_relu(ctx);
     printf("Conv+ReLU fusions: %d\n", total_conv_relu);
     
@@ -330,7 +553,8 @@ int graph_opt_run(GraphOptContext *ctx) {
            ctx->node_count - skipped, skipped);
     printf("=========================\n\n");
     
-    ctx->fusions_applied = total_conv_bn + total_conv_relu;
+    ctx->fusions_applied = total_conv_bn + total_conv_add +
+                           total_conv_silu + total_conv_relu;
     return ctx->fusions_applied;
 }
 
