@@ -37,6 +37,28 @@
 #define OMP_MIN_M  24
 
 /* ============================================================
+ * 线程局部 B-pack 缓冲: 消除 sgemm_nn_packed_a 每次调用的 malloc 开销.
+ * ResNet101 的 832 次 Conv 调用 -> 832 次 malloc/free 全部消除.
+ * 容量按需增长, 程序结束由 OS 回收 (thread_local 不需主动 free).
+ * ============================================================ */
+static _Thread_local float *tls_b_pack = NULL;
+static _Thread_local size_t tls_b_pack_floats = 0;
+
+static float* get_b_pack_buf(size_t need_floats) {
+    if (tls_b_pack_floats < need_floats) {
+        free(tls_b_pack);
+        size_t bytes = need_floats * sizeof(float);
+        if (posix_memalign((void**)&tls_b_pack, 32, bytes) != 0) {
+            tls_b_pack = NULL;
+            tls_b_pack_floats = 0;
+            return NULL;
+        }
+        tls_b_pack_floats = need_floats;
+    }
+    return tls_b_pack;
+}
+
+/* ============================================================
  * B 打包: k-major 行优先, AVX2 向量化
  * pb[k * TILE_NR + n]
  * ============================================================ */
@@ -327,6 +349,15 @@ void* sgemm_pack_a_offline(int M, int K, const float *A, int lda, size_t *out_si
     va = _mm256_set1_ps(pa[(KK)*TILE_MR + 4]); c4L = _mm256_fmadd_ps(va, bL, c4L); c4R = _mm256_fmadd_ps(va, bR, c4R); \
     va = _mm256_set1_ps(pa[(KK)*TILE_MR + 5]); c5L = _mm256_fmadd_ps(va, bL, c5L); c5R = _mm256_fmadd_ps(va, bR, c5R);
 
+/* prefetch 提示宏: 让下一段 pa/pb 提前进入 L1.
+ * 64 字节 = 1 cache line. pa stride = TILE_MR*4 = 24B, 所以提前 8 步覆盖大约 192 B = 3 cache lines.
+ * pb stride = TILE_NR*4 = 64B, 所以提前 4 步覆盖 256B = 4 cache lines. */
+#define PF_AHEAD 8
+#define PREFETCH_NEXT(KK) \
+    _mm_prefetch((const char*)(pa + ((KK) + PF_AHEAD) * TILE_MR), _MM_HINT_T0); \
+    _mm_prefetch((const char*)(pb + ((KK) + PF_AHEAD) * TILE_NR), _MM_HINT_T0); \
+    _mm_prefetch((const char*)(pb + ((KK) + PF_AHEAD) * TILE_NR + 8), _MM_HINT_T0);
+
 extern void micro_6x16_asm_packed_a(const float *pa, const float *pb, float *C, int ldc, int ck, int zero_mode);
 
 static void micro_6x16_packed_a(const float * __restrict__ pa,
@@ -372,8 +403,12 @@ static void micro_6x16_packed_a(const float * __restrict__ pa,
 
     int k = 0;
     while (k + 3 < ck) {
+        /* prefetch 提示: 提前 PF_AHEAD 步 (=8) 把 pa/pb 拉进 L1.
+         * 在 4 步展开的开头各发一次 prefetch, 摊薄指令开销. */
+        PREFETCH_NEXT(0);
         KERNEL_STEP_PACKED_A(0);
         KERNEL_STEP_PACKED_A(1);
+        PREFETCH_NEXT(2);
         KERNEL_STEP_PACKED_A(2);
         KERNEL_STEP_PACKED_A(3);
         pa += 4 * TILE_MR;
@@ -472,8 +507,9 @@ void sgemm_nn_packed_a(int M, int N, int K,
 #endif
 
 
-    /* 分摊打包 B 缓冲，供并行任务安全只读共用，干掉竞争与写屏障！ */
-    float *B_pack_shared = (float*)malloc(TILE_KC * TILE_NC * sizeof(float));
+    /* 分摊打包 B 缓冲，供并行任务安全只读共用.
+     * 使用线程局部静态缓冲, 消除每次调用的 malloc/free 开销. */
+    float *B_pack_shared = get_b_pack_buf((size_t)TILE_KC * TILE_NC);
     if (!B_pack_shared) return;
 
     for (int n0 = 0; n0 < N; n0 += TILE_NC) {
@@ -517,5 +553,5 @@ void sgemm_nn_packed_a(int M, int N, int K,
             }
         }
     }
-    free(B_pack_shared);
+    /* B_pack_shared 是 thread-local static, 不需要释放 */
 }
