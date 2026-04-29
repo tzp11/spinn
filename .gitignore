@@ -41,6 +41,10 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Documentation (only README.md is tracked)
+*.md
+!README.md
+
 # Logs and temp
 *.log
 *.txt
