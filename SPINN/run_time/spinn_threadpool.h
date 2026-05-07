@@ -29,7 +29,7 @@ typedef struct {
     pthread_cond_t   cond_done;
     
     int              shutdown;
-    int              generation;
+    atomic_int       generation;
 } SpinnThreadPool;
 
 SpinnThreadPool *spinn_threadpool_create(int num_threads);

@@ -23,6 +23,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include <math.h>
 
 /* ============================================================
  * Direct Conv 1×1 (单个 output channel)

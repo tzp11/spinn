@@ -17,35 +17,43 @@ static void *worker_loop(void *arg) {
     SpinnThreadPool *pool = (SpinnThreadPool *)arg;
     
     for (;;) {
+        int my_gen = atomic_load_explicit(&pool->generation, memory_order_acquire);
+        int spin = 0;
+        
         /* 自旋等待新任务 (低延迟) */
-        pthread_mutex_lock(&pool->mutex);
-        int my_gen = pool->generation;
-        while (!pool->shutdown && pool->generation == my_gen) {
-            pthread_cond_wait(&pool->cond_work, &pool->mutex);
+        while (!pool->shutdown && atomic_load_explicit(&pool->generation, memory_order_acquire) == my_gen) {
+            if (spin < 2000000) {
+#if defined(__x86_64__) || defined(__amd64__)
+                __builtin_ia32_pause();
+#endif
+                spin++;
+            } else {
+                pthread_mutex_lock(&pool->mutex);
+                if (!pool->shutdown && atomic_load_explicit(&pool->generation, memory_order_acquire) == my_gen) {
+                    pthread_cond_wait(&pool->cond_work, &pool->mutex);
+                }
+                pthread_mutex_unlock(&pool->mutex);
+            }
         }
-        if (pool->shutdown) {
-            pthread_mutex_unlock(&pool->mutex);
-            break;
-        }
-        pthread_mutex_unlock(&pool->mutex);
+        
+        if (pool->shutdown) break;
         
         /* 无锁抢任务 */
         for (;;) {
-            int task = atomic_fetch_add(&pool->next_task, 1);
+            int task = atomic_fetch_add_explicit(&pool->next_task, 1, memory_order_relaxed);
             if (task >= pool->total_tasks) break;
             
             pool->task_fn(pool->task_ctx, task, pool->total_tasks);
-            atomic_fetch_add(&pool->tasks_done, 1);
+            atomic_fetch_add_explicit(&pool->tasks_done, 1, memory_order_release);
         }
         
         /* 通知主线程（如果自己是最后完成的） */
-        if (atomic_load(&pool->tasks_done) >= pool->total_tasks) {
+        if (atomic_load_explicit(&pool->tasks_done, memory_order_acquire) >= pool->total_tasks) {
             pthread_mutex_lock(&pool->mutex);
             pthread_cond_signal(&pool->cond_done);
             pthread_mutex_unlock(&pool->mutex);
         }
     }
-    
     return NULL;
 }
 
@@ -58,9 +66,9 @@ SpinnThreadPool *spinn_threadpool_create(int num_threads) {
     int num_workers = num_threads - 1;
     pool->num_threads = num_threads;
     pool->shutdown = 0;
-    pool->generation = 0;
-    atomic_store(&pool->next_task, 0);
-    atomic_store(&pool->tasks_done, 0);
+    atomic_init(&pool->generation, 0);
+    atomic_init(&pool->next_task, 0);
+    atomic_init(&pool->tasks_done, 0);
     pool->total_tasks = 0;
     
     pthread_mutex_init(&pool->mutex, NULL);
@@ -88,32 +96,43 @@ void spinn_threadpool_parallel_for(SpinnThreadPool *pool,
         return;
     }
     
-    /* 设置任务并唤醒 workers */
+    /* 设置任务 */
     pool->task_fn = fn;
     pool->task_ctx = ctx;
     pool->total_tasks = total_tasks;
-    atomic_store(&pool->next_task, 0);
-    atomic_store(&pool->tasks_done, 0);
+    atomic_store_explicit(&pool->next_task, 0, memory_order_relaxed);
+    atomic_store_explicit(&pool->tasks_done, 0, memory_order_relaxed);
     
+    /* 更新代数并唤醒 workers */
+    atomic_fetch_add_explicit(&pool->generation, 1, memory_order_release);
     pthread_mutex_lock(&pool->mutex);
-    pool->generation++;
     pthread_cond_broadcast(&pool->cond_work);
     pthread_mutex_unlock(&pool->mutex);
     
     /* 主线程也抢任务 */
     for (;;) {
-        int task = atomic_fetch_add(&pool->next_task, 1);
+        int task = atomic_fetch_add_explicit(&pool->next_task, 1, memory_order_relaxed);
         if (task >= total_tasks) break;
         fn(ctx, task, total_tasks);
-        atomic_fetch_add(&pool->tasks_done, 1);
+        atomic_fetch_add_explicit(&pool->tasks_done, 1, memory_order_release);
     }
     
-    /* 等待所有任务完成 */
-    pthread_mutex_lock(&pool->mutex);
-    while (atomic_load(&pool->tasks_done) < total_tasks) {
-        pthread_cond_wait(&pool->cond_done, &pool->mutex);
+    /* 等待所有任务完成 (自旋+休眠) */
+    int spin = 0;
+    while (atomic_load_explicit(&pool->tasks_done, memory_order_acquire) < total_tasks) {
+        if (spin < 2000000) {
+#if defined(__x86_64__) || defined(__amd64__)
+            __builtin_ia32_pause();
+#endif
+            spin++;
+        } else {
+            pthread_mutex_lock(&pool->mutex);
+            if (atomic_load_explicit(&pool->tasks_done, memory_order_acquire) < total_tasks) {
+                pthread_cond_wait(&pool->cond_done, &pool->mutex);
+            }
+            pthread_mutex_unlock(&pool->mutex);
+        }
     }
-    pthread_mutex_unlock(&pool->mutex);
 }
 
 void spinn_threadpool_destroy(SpinnThreadPool *pool) {
@@ -121,8 +140,9 @@ void spinn_threadpool_destroy(SpinnThreadPool *pool) {
     
     int num_workers = pool->num_threads - 1;
     
-    pthread_mutex_lock(&pool->mutex);
     pool->shutdown = 1;
+    atomic_fetch_add_explicit(&pool->generation, 1, memory_order_release);
+    pthread_mutex_lock(&pool->mutex);
     pthread_cond_broadcast(&pool->cond_work);
     pthread_mutex_unlock(&pool->mutex);
     

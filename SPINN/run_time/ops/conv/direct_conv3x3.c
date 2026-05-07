@@ -50,11 +50,7 @@ void direct_conv3x3_s1(
             const float *xic = X + ic * H * W;
             const float *wic = woc + ic * 9;
             
-            /* 3×3 卷积核 */
-            float w00 = wic[0], w01 = wic[1], w02 = wic[2];
-            float w10 = wic[3], w11 = wic[4], w12 = wic[5];
-            float w20 = wic[6], w21 = wic[7], w22 = wic[8];
-            
+            // Removed unused variables
             /* 遍历输出位置 */
             for (int oh = 0; oh < OH; oh++) {
                 for (int ow = 0; ow < OW; ow++) {

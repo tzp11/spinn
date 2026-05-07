@@ -304,8 +304,38 @@ void sgemm_tiled(int M, int N, int K,
 void sgemm_nn(int M, int N, int K,
               const float *A, int lda,
               const float *B, int ldb,
-              float *C, int ldc) {
+              float *C, int ldc,
+              const float *bias,
+              int fused_act,
+              const float *residual) {
+    // Currently sgemm_nn directly delegates to sgemm_tiled, which doesn't support fusion inside the kernel.
+    // For now we will manual fallback the fusion here on top of the C array.
     sgemm_tiled(M, N, K, 1.0f, A, lda, B, ldb, 0.0f, C, ldc);
+    
+    // Post-process fallback for sgemm_nn (only used if un-packed)
+    if (bias || residual || fused_act > 0) {
+        int total = M * N;
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(static) if(total >= 4096)
+        #endif
+        for (int m = 0; m < M; m++) {
+            float b = bias ? bias[m] : 0.0f;
+            float *c_row = C + m * ldc;
+            const float *res_row = residual ? residual + m * ldc : NULL;
+            for (int n = 0; n < N; n++) {
+                float v = c_row[n] + b;
+                if (res_row) {
+                    if (fused_act == 4 || fused_act == 5) v += res_row[n];
+                }
+                if (fused_act == 1 || fused_act == 5) {
+                    if (v < 0.0f) v = 0.0f;
+                } else if (fused_act == 3) {
+                    v = v / (1.0f + __builtin_expf(-v));
+                }
+                c_row[n] = v;
+            }
+        }
+    }
 }
 
 /* ============================================================
@@ -467,7 +497,10 @@ static void __attribute__((unused)) micro_scalar_packed_a(const float * __restri
 void sgemm_nn_packed_a(int M, int N, int K,
                        const void *packed_A,
                        const float *B, int ldb,
-                       float *C, int ldc) {
+                       float *C, int ldc,
+                       const float *bias,
+                       int fused_act,
+                       const float *residual) {
     if (M <= 0 || N <= 0 || K <= 0) return;
 
     const float *packed_a_flt = (const float*)packed_A;

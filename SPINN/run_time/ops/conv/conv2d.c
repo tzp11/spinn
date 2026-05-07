@@ -11,15 +11,48 @@
 #include <omp.h>
 #endif
 
-/* ============================================================
- * im2col: 将输入按滑动窗口展开
- * 参照 ORT: onnxruntime/core/util/math/im2col.cc
- *
- * 输出: col[C*KH*KW, OH*OW]  (row = kernel element, col = output pixel)
- * ============================================================ */
+static void im2col_3x3_s1p1(const float *X, int C, int H, int W, float *col) {
+    const int ohw = H * W;
+    int row = 0;
+    
+    for (int c = 0; c < C; c++) {
+        const float *xc = X + c * ohw;
+        for (int kh = 0; kh < 3; kh++) {
+            for (int kw = 0; kw < 3; kw++) {
+                float *dst = col + row * ohw;
+                
+                int ow_start = (kw == 0) ? 1 : 0;
+                int ow_end   = (kw == 2) ? (W - 1) : W;
+                int copy_len = ow_end - ow_start;
+                int src_offset = ow_start - 1 + kw;
+                
+                for (int oh = 0; oh < H; oh++) {
+                    int ih = oh - 1 + kh;
+                    float *dst_row = dst + oh * W;
+                    if (ih < 0 || ih >= H) {
+                        memset(dst_row, 0, W * sizeof(float));
+                    } else {
+                        const float *src_row = xc + ih * W;
+                        if (ow_start > 0) dst_row[0] = 0.0f;
+                        if (copy_len > 0) {
+                            memcpy(dst_row + ow_start, src_row + src_offset, copy_len * sizeof(float));
+                        }
+                        if (ow_end < W) dst_row[W - 1] = 0.0f;
+                    }
+                }
+                row++;
+            }
+        }
+    }
+}
+
 static void im2col_cpu(const float *X, int C, int H, int W,
                        int KH, int KW, int SH, int SW, int PH, int PW,
                        int OH, int OW, float *col) {
+    if (KH == 3 && KW == 3 && SH == 1 && SW == 1 && PH == 1 && PW == 1 && OH == H && OW == W) {
+        im2col_3x3_s1p1(X, C, H, W, col);
+        return;
+    }
     const int ohw = OH * OW;
     int row = 0;
     for (int c = 0; c < C; c++) {
@@ -173,75 +206,27 @@ int op_conv2d(SpinnTensor **in, int n_in,
                 }
             }
 
+            const float *cur_bias = bias ? bias + g * OC_g : NULL;
+            const float *cur_res  = residual ? residual + (n * OC + g * OC_g) * ohw : NULL;
+
             /* ---- GEMM ---- */
             if (in[1]->packed_data && group == 1) {
                 sgemm_nn_packed_a(OC_g, ohw, kernel_dim,
                                   in[1]->packed_data,
                                   gemm_b, ldb,
-                                  Yg, ohw);
+                                  Yg, ohw,
+                                  cur_bias, fused_act, cur_res);
             } else {
                 sgemm_nn(OC_g, ohw, kernel_dim,
                          Wg, kernel_dim,
                          gemm_b, ldb,
-                         Yg, ohw);
-            }
-
-            /* Bias */
-            if (bias) {
-                int oc_base = g * OC_g;
-                for (int oc = 0; oc < OC_g; oc++) {
-                    float b = bias[oc_base + oc];
-                    float *yo = Yg + oc * ohw;
-                    for (int i = 0; i < ohw; i++) yo[i] += b;
-                }
+                         Yg, ohw,
+                         cur_bias, fused_act, cur_res);
             }
         }
     }
 
     if (col_buf) free(col_buf);
-
-    /* ============================================================
-     * 融合 post-op (依据 fused_act 编码:
-     *   1 = ReLU
-     *   3 = SiLU (x * sigmoid(x))
-     *   4 = Add (residual)
-     *   5 = Add + ReLU
-     * ============================================================ */
-    int total = N * OC * OH * OW;
-    if (fused_act == 1) {
-        #ifdef _OPENMP
-        #pragma omp parallel for schedule(static) if(total >= 4096)
-        #endif
-        for (int i = 0; i < total; i++) {
-            if (Y[i] < 0.0f) Y[i] = 0.0f;
-        }
-    } else if (fused_act == 3) {
-        /* SiLU: y = x / (1 + exp(-x)) */
-        #ifdef _OPENMP
-        #pragma omp parallel for schedule(static) if(total >= 4096)
-        #endif
-        for (int i = 0; i < total; i++) {
-            float x = Y[i];
-            Y[i] = x / (1.0f + expf(-x));
-        }
-    } else if (fused_act == 4 && residual) {
-        /* Conv + Add (残差) */
-        #ifdef _OPENMP
-        #pragma omp parallel for schedule(static) if(total >= 4096)
-        #endif
-        for (int i = 0; i < total; i++) {
-            Y[i] += residual[i];
-        }
-    } else if (fused_act == 5 && residual) {
-        /* Conv + Add + ReLU (ResNet 残差块) */
-        #ifdef _OPENMP
-        #pragma omp parallel for schedule(static) if(total >= 4096)
-        #endif
-        for (int i = 0; i < total; i++) {
-            float v = Y[i] + residual[i];
-            Y[i] = v < 0.0f ? 0.0f : v;
-        }
-    }
 
     return 0;
 }

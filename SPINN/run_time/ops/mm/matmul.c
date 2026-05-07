@@ -20,7 +20,7 @@ int op_matmul(SpinnTensor **in, int n_in,
         int M = in[0]->dims[0];
         int K = in[0]->dims[1];
         int N = in[1]->dims[1];
-        sgemm_nn(M, N, K, A, K, B, N, C, N);
+        sgemm_nn(M, N, K, A, K, B, N, C, N, NULL, 0, NULL);
         return 0;
     }
     
@@ -37,7 +37,8 @@ int op_matmul(SpinnTensor **in, int n_in,
                 sgemm_nn(M, N, K,
                          A + b_idx * M * K, K,
                          B, N,
-                         C + b_idx * M * N, N);
+                         C + b_idx * M * N, N,
+                         NULL, 0, NULL);
             }
             return 0;
         }
@@ -54,7 +55,8 @@ int op_matmul(SpinnTensor **in, int n_in,
         sgemm_nn(M, N, K,
                  A + b_idx * M * K, K,
                  B + b_idx * K * N, N,
-                 C + b_idx * M * N, N);
+                 C + b_idx * M * N, N,
+                 NULL, 0, NULL);
     }
     return 0;
 }

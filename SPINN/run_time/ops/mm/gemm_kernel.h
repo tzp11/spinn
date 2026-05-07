@@ -32,12 +32,15 @@ void sgemm_tiled(int M, int N, int K,
                  float *C, int ldc);
 
 /*
- * 简化版：C = A * B (alpha=1, beta=0)
+ * 简化版：C = A * B (alpha=1, beta=0) 带有后处理融合
  */
 void sgemm_nn(int M, int N, int K,
               const float *A, int lda,
               const float *B, int ldb,
-              float *C, int ldc);
+              float *C, int ldc,
+              const float *bias,
+              int fused_act,
+              const float *residual);
 
 /* 
  * 静态权重预打包 (Offline Pack A)
@@ -46,11 +49,14 @@ void sgemm_nn(int M, int N, int K,
 void* sgemm_pack_a_offline(int M, int K, const float *A, int lda, size_t *out_size);
 
 /*
- * 使用预打包的 A 的 SGEMM (alpha=1, beta=0)
+ * 使用预打包的 A 的 SGEMM (alpha=1, beta=0) 带有后处理融合
  */
 void sgemm_nn_packed_a(int M, int N, int K,
                        const void *packed_A,
                        const float *B, int ldb,
-                       float *C, int ldc);
+                       float *C, int ldc,
+                       const float *bias,
+                       int fused_act,
+                       const float *residual);
 
 #endif /* __GEMM_KERNEL_H__ */

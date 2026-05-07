@@ -163,7 +163,8 @@ int winograd_conv_3x3(const float *X, int N, int C, int H, int W,
             sgemm_nn(OC, n_tiles, C,
                      U_packed + a * OC * C, C,
                      V + a * C * n_tiles, n_tiles,
-                     Mout + a * OC * n_tiles, n_tiles);
+                     Mout + a * OC * n_tiles, n_tiles,
+                     NULL, 0, NULL);
         }
 
         /* === Step 4: 输出逆变换 + 写回 === */
