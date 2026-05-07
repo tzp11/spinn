@@ -155,6 +155,14 @@ int spinn_plan_memory(SpinnContext *ctx, uint32_t max_arena_bytes) {
         sim_ref[i] = ctx->tensors[i].ref_count;
     }
     
+    // 标记模型输出 tensor: 不允许释放 (即使 ref_count=0)
+    // 原因: 输出 tensor 没有下游消费者, ref_count 可能为 0,
+    // 但它们的值需要在推理结束后被读取
+    uint8_t *is_output = (uint8_t*)calloc(ctx->num_tensors, 1);
+    for (int i = 0; i < ctx->header.num_outputs; i++) {
+        is_output[ctx->output_ids[i]] = 1;
+    }
+    
     uint32_t peak = 0;
     
     // *** 关键修复：为模型输入tensor预先分配offset ***
@@ -214,25 +222,26 @@ int spinn_plan_memory(SpinnContext *ctx, uint32_t max_arena_bytes) {
             if (end > peak) peak = end;
         }
         
-        // 2. 减少输入的引用计数，归零则释放
+        // 2. 减少输入的引用计数，归零则释放 (模型输出除外)
         for (int j = 0; j < node->num_inputs; j++) {
             uint16_t in_id = node->input_ids[j];
             SpinnTensor *t = &ctx->tensors[in_id];
             
             if (t->is_weight) continue;
             if (t->size == 0) continue;
+            if (is_output[in_id]) continue;  /* 模型输出永不释放 */
             
             if (sim_ref[in_id] > 0) {
                 sim_ref[in_id]--;
                 if (sim_ref[in_id] == 0) {
                     free_offset(t->offset, t->size);
-                    // current 逻辑不再需要，因为我们用 end > peak 来确定大小
                 }
             }
         }
     }
     
     free(sim_ref);
+    free(is_output);
     free_list_destroy();
     
     // 保存峰值

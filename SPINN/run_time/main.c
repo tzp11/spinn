@@ -110,11 +110,26 @@ int main(int argc, char *argv[]) {
     
     /* 输出结果 (stdout) */
     printf("SPINN Result: ");
-    int n = (t_out->elem_count > 10) ? 10 : t_out->elem_count;
+    int n = t_out->elem_count;
     for (int i = 0; i < n; i++) {
         printf("%.6f ", output_data[i]);
     }
     printf("\n");
+    
+    /* 二进制输出 dump (用于与 ONNX Runtime 对比) */
+    const char *dump_env = getenv("SPINN_DUMP");
+    if (dump_env && dump_env[0] != '0') {
+        FILE *f = fopen(dump_env, "wb");
+        if (f) {
+            /* dump 所有输出 tensor */
+            for (int oi = 0; oi < ctx->header.num_outputs; oi++) {
+                SpinnTensor *to = &ctx->tensors[ctx->output_ids[oi]];
+                if (to->data) fwrite(to->data, sizeof(float), to->elem_count, f);
+            }
+            fclose(f);
+            fprintf(stderr, "Dumped %d outputs to %s\n", ctx->header.num_outputs, dump_env);
+        }
+    }
     
     free(input_data);
     free(output_data);

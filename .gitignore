@@ -42,8 +42,8 @@ venv/
 Thumbs.db
 
 # Documentation (only README.md is tracked)
-*.md
-!README.md
+# *.md
+# !README.md
 
 # Logs and temp
 *.log
